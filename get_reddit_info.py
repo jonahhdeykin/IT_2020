@@ -15,13 +15,18 @@ import math
 import numpy as np
 import sklearn.cluster as SKCL
 import deflate
+import statistics
+from copy import deepcopy
+import scipy
 
+#get reddit data for a given sub and a given day
 def getPushshiftData(search_type, after, before, sub):
 	url = 'https://api.pushshift.io/reddit/search/'+ str(search_type) +'/?size=500&after='+str(after)+'&before='+str(before)+'&subreddit='+str(sub)
 	r = requests.get(url)
 	data = json.loads(r.text)
 	return data['data']
 
+#Pull the correct time bounds for a trading day
 def get_day(search_type, sub, date):
 	timez = pytz.timezone("America/New_York")
 	date =  timez.localize(date).replace(hour=16, minute=0)
@@ -37,6 +42,7 @@ def get_day(search_type, sub, date):
 			pass
 	return data
 
+#Compute bzip2 NCD
 def score_zip(x, y, c_x, c_y):
 	x = bytes(x, encoding='utf8')
 	y = bytes(y, encoding='utf8')
@@ -48,6 +54,7 @@ def score_zip(x, y, c_x, c_y):
 
 	return (min(c_xy, c_yx) - min(c_x, c_y))/max(c_x, c_y)
 
+#Compute deflate NCD
 def score_def(x, y, c_x, c_y):
 	x = bytes(x, encoding='utf8')
 	y = bytes(y, encoding='utf8')
@@ -59,6 +66,7 @@ def score_def(x, y, c_x, c_y):
 
 	return (min(c_xy, c_yx) - min(c_x, c_y))/max(c_x, c_y)
 
+#Compute LZMA NCD
 def score_lzma(x, y, c_x, c_y):
 	x = bytes(x, encoding='utf8')
 	y = bytes(y, encoding='utf8')
@@ -70,6 +78,7 @@ def score_lzma(x, y, c_x, c_y):
 
 	return (min(c_xy, c_yx) - min(c_x, c_y))/max(c_x, c_y)
 
+#Scrape the reddit data
 def scrape_data():
 	text_data = []
 	with open('prices.csv', 'r') as f:
@@ -108,6 +117,7 @@ def scrape_data():
 	with open('data.txt', 'wb') as f:
 		pickle.dump(text_data, f)
 
+#Precompute the distance matricies
 def gen_mat_vals(t_list, z_vals, p_vals, m_vals, dates, precomputed, path):
 	texts = []
 	count = 0
@@ -145,6 +155,7 @@ def gen_mat_vals(t_list, z_vals, p_vals, m_vals, dates, precomputed, path):
 			with open('m_vals_'  + path + '.txt', 'wb') as f:
 				pickle.dump(m_vals, f)
 
+#Construct a distace matrix given list of precomputed values
 def build_distance_matrix(t_list,  p_vals, z_vals, m_vals):
 	dim = int(math.sqrt(len(p_vals)*2))
 
@@ -167,74 +178,7 @@ def build_distance_matrix(t_list,  p_vals, z_vals, m_vals):
 
 	return(p_mat, z_mat, m_mat)
 
-def compute_silhouette_pre(labels, dist):
-	unique_ls = np.unique(labels)
-	s_score = 0
-	for l in unique_ls:
-		if l != -1:
-			locs = np.where(labels == l)
-			locs = locs[0]
-			if locs.size > 1:
-				for loc_1 in locs:
-					a = 0
-					for loc_2 in locs:
-						if loc_1 != loc_2:
-							a += dist[loc_1][loc_2]
-					a = a/(locs.size-1)
-					b = 100
-					for l2 in unique_ls:
-						if l != l2 and l2 != -1:
-							t_val = 0
-							o_locs = np.where(labels == l2)
-							o_locs = o_locs[0]
-							for loc_3 in o_locs:
-								t_val += dist[loc_1][loc_3]
-							t_val = t_val/o_locs.size
-
-							if t_val < b:
-								b = t_val
-					print(a, b)
-					s_score += (b-a)/max(a, b)
-
-	try:
-		s_score = s_score/(labels.size - np.where(labels == -1)[0].size)
-	except:
-		return 0
-
-	return s_score
-
-def compute_silhouette(labels, points):
-	unique_ls = np.unique(labels)
-	s_score = 0
-	for l in unique_ls:
-		if l != -1:
-			locs = np.where(labels == l)
-			locs = locs[0]
-			if locs.size > 1:
-				for loc_1 in locs:
-					a = 0
-					for loc_2 in locs:
-						if loc_1 != loc_2:
-							a += np.linalg.norm(points[loc_1] - points[loc_2])
-					a = a/(locs.size-1)
-					b = 100
-					for l2 in unique_ls:
-						if l != l2 and l2 != -1:
-							t_val = 0
-							o_locs = np.where(labels == l2)
-							o_locs = o_locs[0]
-							for loc_3 in o_locs:
-								t_val += np.linalg.norm(points[loc_1] - points[loc_3])
-							t_val = t_val/o_locs.size
-
-							if t_val < b:
-								b = t_val
-					print(a, b)
-					s_score += (b-a)/max(a, b)
-
-	s_score = s_score/(labels.size - np.where(labels == -1)[0].size)
-	return s_score
-
+#Embed the points in euclidean space using the distance matrix
 def transform_metric(dist, epochs):
 	inverted_dist = np.ones(dist.shape) - dist - np.diag(np.ones((dist.shape[0]),))
 	states = np.diag(np.ones((dist.shape[0]),))
@@ -246,415 +190,311 @@ def transform_metric(dist, epochs):
 
 	return states.transpose()
 
+#run a single split with n as the split ratio
+def split_n(train, test, distance, n, returns):
+	lower = max(1, int(len(test)*n))
+	upper = min(int(len(test)*(1-n)), len(test) - 1)
 
-def precompute(t_list, path):
-	t_dict = dict()
+	test_returns = []
+	for index in train:
+		test_returns.append((index, returns[index]))
+	test_returns.sort(key= lambda x: x[1])
+	lower_comp = [i[0] for i in test_returns[:lower]]
+	upper_comp = [i[0] for i in test_returns[upper:]]
 
-	for day in t_list:
-		t_dict[day[0]] = (len(deflate.gzip_compress(bytes(day[1], encoding='utf8'))), len(bz2.compress(bytes(day[1], encoding='utf8'))), len(lzma.compress(bytes(day[1], encoding='utf8'))))
-		print(day[0])
+	neg_test = []
+	pos_test = []
+	lower_index = []
+	upper_index = []
+	for index in test:
+		l_c = np.mean(distance[index][lower_comp])
+		u_c = np.mean(distance[index][upper_comp])
 
-	with open('precomputed_' + str(path) + '.txt', 'wb') as f:
-		pickle.dump(t_dict, f)
+		if l_c < u_c:
+			neg_test.append(returns[index])
+			lower_index.append(index)
+		else:
+			pos_test.append(returns[index])
+			upper_index.append(index)
 
-def evaluate_clustering(dates, labels, s_p_returns):
+	l_m = sum(neg_test)/len(neg_test)
+	l_sd = statistics.pstdev(neg_test)
 
-	returns_dict = dict()
+	u_m = sum(pos_test)/len(pos_test)
+	u_sd = statistics.pstdev(pos_test)
 
-	for i in range(0, len(labels)):
-		date = dates[i]
-		date_f = dates[i+1]
-		label = labels[i]
-		if label != -1:
-			if label in returns_dict:
-				returns_dict[label].append((s_p_returns[date_f] - s_p_returns[date])/s_p_returns[date])
-			else:
-				returns_dict[label] = [s_p_returns[date]]
+	return(l_m, l_sd, len(neg_test), u_m, u_sd, len(pos_test), lower_index, upper_index)
 
-	return returns_dict
+#Run all different splits for step_size trials
+def run_splits(step_size, path_list, seed=None):
+	full_results = dict()
+	vals = []
+	p_mats = []
+	z_mats = []
+	m_mats = []
+	tests = []
+	rets = []
+	trains = []
+	pos_dict = dict()
+	if seed is not None:
+		np.random.seed(seed)
+	for path in path_list:
+		with open('data.txt', 'rb') as f:
+			text_list = pickle.load(f)
 
-def compute_all_clusters(path):
-	with open('data.txt', 'rb') as f:
-		text_list = pickle.load(f)
+		with open('dates_'+ path +'.txt', 'rb') as f:
+			dates = pickle.load(f)
+			dates.reverse()
 
-	with open('dates_'+ path +'.txt', 'rb') as f:
-		dates = pickle.load(f)
+		with open('p_vals_'+ path +'.txt', 'rb') as f:
+			p_vals = pickle.load(f)
 
-	with open('p_vals_'+ path +'.txt', 'rb') as f:
-		p_vals = pickle.load(f)
+		with open('z_vals_'+ path +'.txt', 'rb') as f:
+			z_vals = pickle.load(f)
 
-	with open('z_vals_'+ path +'.txt', 'rb') as f:
-		z_vals = pickle.load(f)
+		with open('m_vals_'+ path +'.txt', 'rb') as f:
+			m_vals = pickle.load(f)
 
-	with open('m_vals_'+ path +'.txt', 'rb') as f:
-		m_vals = pickle.load(f)
+		with open('s_p.txt', 'rb') as f:
+			s_p = pickle.load(f)
 
-	text_list = iter(text_list)
+		returns = dict()
+		for i in range(0, len(dates)-1):
+			returns[len(dates)-1-i] = (s_p[dates[len(dates)-2-i]] - s_p[dates[len(dates)-1-i]])/s_p[dates[len(dates)-1-i]]
 
-	p_mat, z_mat, m_mat = build_distance_matrix(text_list, p_vals, z_vals, m_vals)
+		rets.append(returns)
 
-
-	split = int(2*p_mat.shape[0]/3)
-
-	p_mat_test = p_mat[:split, :split]
-	z_mat_test = z_mat[:split, :split]
-	m_mat_test = m_mat[:split, :split]
-
-	p_km_full = transform_metric(p_mat, 1000)
-	z_km_full = transform_metric(z_mat, 1000)
-	m_km_full = transform_metric(m_mat, 1000)
-
-	p_km_test = p_km_full[:split]
-	z_km_test = z_km_full[:split]
-	m_km_test = m_km_full[:split]
-
-
-
-	p_s = []
-	z_s = []
-	m_s = []
-
-
-	top = 3
-	bottom = 2
-	for i in range(0, 100):
-		scan = SKCL.DBSCAN(eps=((top-bottom) * i/99) + bottom, metric = 'precomputed')
-		p_s.append(scan.fit(p_mat_test).labels_)
-		z_s.append(scan.fit(z_mat_test).labels_)
-		m_s.append(scan.fit(m_mat_test).labels_)
-		print('DBSCAN {}/100'.format(i+1))
-
-
-	with open('p_scan_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_s, f)
-
-	with open('z_scan_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_s, f)
-
-	with open('m_scan_'+ path +'.txt', 'wb') as f:
-		pickle.dump(m_s, f)
-
-	p_a = []
-	z_a = []
-	m_a = []
-
-	for i in range(2, 21):
-		agg = SKCL.AgglomerativeClustering(n_clusters= i, affinity = 'precomputed', linkage='average')
-		p_a.append(agg.fit(p_mat_test).labels_)
-		z_a.append(agg.fit(z_mat_test).labels_)
-		m_a.append(agg.fit(m_mat_test).labels_)
-		print('Agglomerative Clustering {}/19'.format(i-1))
-
-	with open('p_agg_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_a, f)
-
-	with open('z_agg_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_a, f)
-
-	with open('m_agg_'+ path +'.txt', 'wb') as f:
-		pickle.dump(m_a, f)
-
-	p_km = []
-	z_km = []
-	m_km = []
-
-	for i in range(2, 21):
-		km = SKCL.KMeans(n_clusters= i)
-		p_km.append(km.fit(p_km_test).labels_)
-		z_km.append(km.fit(z_km_test).labels_)
-		m_km.append(km.fit(m_km_test).labels_)
-		print('K Means {}/19'.format(i-1))
-
-	with open('p_km_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_km, f)
-
-	with open('z_km_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_km, f)
-
-	with open('m_km_'+ path +'.txt', 'wb') as f:
-		pickle.dump(m_km, f)
-
-
-def compute_all_silhouette(path):
-	with open('p_scan_'+ path +'.txt', 'rb') as f:
-		p_sc = pickle.load(f)
-
-	with open('z_scan_'+ path +'.txt', 'rb') as f:
-		z_sc = pickle.load(f)
-
-	with open('m_scan_'+ path +'.txt', 'rb') as f:
-		m_sc = pickle.load(f)
-
-	with open('p_agg_'+ path +'.txt', 'rb') as f:
-		p_agg = pickle.load(f)
-
-	with open('z_agg_'+ path +'.txt', 'rb') as f:
-		z_agg = pickle.load(f)
-
-	with open('m_agg_'+ path +'.txt', 'rb') as f:
-		m_agg = pickle.load(f)
-
-	with open('p_km_'+ path +'.txt', 'rb') as f:
-		p_km = pickle.load(f)
-
-	with open('z_km_'+ path +'.txt', 'rb') as f:
-		z_km = pickle.load(f)
-
-	with open('m_km_'+ path +'.txt', 'rb') as f:
-		m_km = pickle.load(f)
-
-	with open('data.txt', 'rb') as f:
-		text_list = pickle.load(f)
 		text_list = iter(text_list)
 
-	with open('dates_'+ path +'.txt', 'rb') as f:
-		dates = pickle.load(f)
+		p_mat, z_mat, m_mat = build_distance_matrix(text_list, p_vals, z_vals, m_vals)
+		p_mats.append(p_mat)
+		z_mats.append(z_mat)
+		m_mats.append(m_mat)
 
-	with open('p_vals_'+ path +'.txt', 'rb') as f:
-		p_vals = pickle.load(f)
+		l = []
+		u = []
 
-	with open('z_vals_'+ path +'.txt', 'rb') as f:
-		z_vals = pickle.load(f)
+		order = np.random.permutation([i for i in range(1, len(dates))])
 
-	with open('m_vals_'+ path +'.txt', 'rb') as f:
-		m_vals = pickle.load(f)
+		train = order[:int(len(order)/2)]
+		trains.append(train)
+		test = order[int(len(order)/2):int(len(order)/4)*3]
+		tests.append(test)
+		vals.append(order[int(len(order)/4)*3:])
 
+		p = []
+		z = []
+		m = []
+		for i in range(1, step_size+1):
+			try:
+				p.append(split_n(train, test, p_mat, (i/step_size) * 0.5, returns))
+			except:
+				p.append((1, 10, 10, 0, 10, 10, [], []))
+			try:
+				z.append(split_n(train, test, z_mat, (i/step_size) * 0.5, returns))
+			except:
+				z.append((1, 10, 10, 0, 10, 10, [], []))
+			try:
+				m.append(split_n(train, test, m_mat, (i/step_size) * 0.5, returns))
+			except:
+				m.append((1, 10, 10, 0, 10, 10, [], []))
+		full_results[path] = (p, z, m)
 
-	p_mat, z_mat, m_mat = build_distance_matrix(text_list, p_vals, z_vals, m_vals)
+		row = []
+		try:
+			row.append(pos_split(train, test, p_mat, returns))
+		except:
+			row.append(('NA',))
+		try:
+			row.append(pos_split(train, test, z_mat, returns))
+		except:
+			row.append(('NA',))
+		try:
+			row.append(pos_split(train, test, m_mat, returns))
+		except:
+			row.append(('NA',))
 
-	split = int(2*p_mat.shape[0]/3)
-
-	p_mat_test = p_mat[:split, :split]
-	z_mat_test = z_mat[:split, :split]
-	m_mat_test = m_mat[:split, :split]
-
-	p_km_full = transform_metric(p_mat, 1000)
-	z_km_full = transform_metric(z_mat, 1000)
-	m_km_full = transform_metric(m_mat, 1000)
-
-	p_km_test = p_km_full[:split]
-	z_km_test = z_km_full[:split]
-	m_km_test = m_km_full[:split]
-
-	p_sc_score = []
-	for sc in p_sc:
-		p_sc_score.append(compute_silhouette_pre(sc, p_mat_test))
-
-	z_sc_score = []
-	for sc in z_sc:
-		z_sc_score.append(compute_silhouette_pre(sc, z_mat_test))
-
-	m_sc_score = []
-	for sc in m_sc:
-		m_sc_score.append(compute_silhouette_pre(sc, m_mat_test))
-
-	p_agg_score = []
-	for sc in p_agg:
-		p_agg_score.append(compute_silhouette_pre(sc, p_mat_test))
-
-	z_agg_score = []
-	for sc in z_agg:
-		z_agg_score.append(compute_silhouette_pre(sc, z_mat_test))
-
-	m_agg_score = []
-	for sc in m_agg:
-		m_agg_score.append(compute_silhouette_pre(sc, m_mat_test))
-
-	p_km_score = []
-	for sc in p_km:
-		p_km_score.append(compute_silhouette(sc, p_km_test))
-
-	z_km_score = []
-	for sc in z_km:
-		z_km_score.append(compute_silhouette(sc, z_km_test))
-
-	m_km_score = []
-	for sc in m_km:
-		m_km_score.append(compute_silhouette(sc, m_km_test))
-
-	with open('p_sc_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_sc_score, f)
-
-	with open('z_sc_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_sc_score, f)
-
-	with open('m_sc_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_sc_score, f)
-
-	with open('p_agg_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_agg_score, f)
-
-	with open('z_agg_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_agg_score, f)
-
-	with open('m_agg_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(m_agg_score, f)
-
-	with open('p_km_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(p_km_score, f)
-
-	with open('z_km_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(z_km_score, f)
-
-	with open('m_km_score_'+ path +'.txt', 'wb') as f:
-		pickle.dump(m_km_score, f)
+		pos_dict[path] = row
 
 
-def compute_dists():
-	with open('precomputed_1.txt', 'rb') as f:
-		precomputed = pickle.load(f)
+	with open('full_results.txt', 'wb') as f:
+		pickle.dump(full_results, f)
 
-	with open('precomputed_5.txt', 'rb') as f:
-		precomputed_5 = pickle.load(f)
 
-	with open('precomputed_20.txt', 'rb') as f:
-		precomputed_20 = pickle.load(f)
 
-	with open('data.txt', 'rb') as f:
-		t_list_1 = pickle.load(f)
+	best_configs = []
+	for key in full_results:
+		res = full_results[key]
+		for c in res:
+			best = 1
+			index = 0
+			temp = 1
+			for i in range(0, len(c)):
+				if c[i][5] > 1 and c[i][2] > 1:
+					temp = one_tailed_t_test(c[i][3], c[i][4], c[i][5], c[i][0], c[i][1], c[i][2])
+				if temp < best:
+					index = i
+					best = temp
+			best_configs.append((best, index))
 
-	t_list_5 = []
-	for i in range(0, int(len(t_list_1)/5)):
-		s = ''
-		for j in range(0, 5):
-			s += t_list_1[5*i +j][1]
-		t_list_5.append((t_list_1[5*i +4][0], s))
+	index = 0
+	val_configs = []
+	for key in full_results:
+		res = full_results[key]
+		try:
+			val_configs.append((key+'_p', split_n(trains[index], vals[index], p_mats[index], ((best_configs[index*3][1]+1)/step_size) * 0.5, rets[index])))
+		except:
+			val_configs.append(('NA', 0))
+		try:
+			val_configs.append((key+'_z', split_n(trains[index], vals[index], z_mats[index], ((best_configs[index*3+1][1]+1)/step_size) * 0.5, rets[index])))
+		except:
+			val_configs.append(('NA', 0))
+		try:
+			val_configs.append((key+'_m',split_n(trains[index], vals[index], m_mats[index], ((best_configs[index*3+2][1]+1)/step_size) * 0.5, rets[index])))
+		except:
+			val_configs.append(('NA', 0))
+		index += 1
 
-	t_list_20 = []
-	for i in range(0, int(len(t_list_1)/20)):
-		s = ''
-		for j in range(0, 20):
-			s += t_list_1[20*i +j][1]
-		t_list_20.append((t_list_1[20*i +19][0], s))
+	return val_configs, full_results, pos_dict
 
-	count = 0
-	count_5 = 0
-	count_20 = 0
+#Run the one taikled Welch's T-test
+def one_tailed_t_test(m1, s1, l1, m2, s2, l2):
+	t = (m1 - m2)/math.sqrt((s1/l1)+(s2/l2))
+	df = (((s1/l1)+(s2/l2))**2)/(((s1/l1)**2)/(l1-1)+((s2/l2)**2)/(l2-1))
+	return(scipy.stats.t.sf(t, df=df))
 
-	z_vals = []
-	p_vals = []
-	m_vals = []
-	z_vals_5 = []
-	p_vals_5 = []
-	m_vals_5 = []
-	z_vals_20 = []
-	p_vals_20 = []
-	m_vals_20 = []
-	dates = []
-	dates_5 = []
-	dates_20 = []
-	texts = []
-	texts_5 = []
-	texts_20 = []
+#Run the simple positive negqtive split test
+def pos_split(train, test, distance, returns):
+	pos = []
+	neg = []
+	for index in train:
+		if returns[index] > 0:
+			pos.append(index)
+		else:
+			neg.append(index)
 
-	i = 0
-	j = 0
-	for day in t_list_1:
-		t_count = 0
-		day_l = precomputed[day[0]]
-		if day[0] not in dates:
+	neg_test = []
+	pos_test = []
+	lower_index = []
+	upper_index = []
+	for index in test:
+		l_c = np.mean(distance[index][neg])
+		u_c = np.mean(distance[index][pos])
 
-			for t in texts:
-				z_vals.append(score_zip(day[1], t[1], day_l[1], precomputed[t[0]][1]))
-				p_vals.append(score_def(day[1], t[1], day_l[0], precomputed[t[0]][0]))
-				m_vals.append(score_lzma(day[1], t[1], day_l[2], precomputed[t[0]][2]))
-				t_count += 1
-				if t_count % 5 == 0:
-					print(count, t_count)
+		if l_c < u_c:
+			neg_test.append(returns[index])
+			lower_index.append(index)
+		else:
+			pos_test.append(returns[index])
+			upper_index.append(index)
 
-			z_vals.append(0)
-			p_vals.append(0)
-			m_vals.append(0)
-			dates.append(day[0])
+	l_m = sum(neg_test)/len(neg_test)
+	l_sd = statistics.pstdev(neg_test)
 
-		texts.append(day)
-		count += 1
+	u_m = sum(pos_test)/len(pos_test)
+	u_sd = statistics.pstdev(pos_test)
 
-		if count % 5 == 0:
-			with open('dates_1.txt', 'wb') as f:
-				pickle.dump(dates, f)
-
-			with open('z_vals_1.txt', 'wb') as f:
-				pickle.dump(z_vals, f)
-
-			with open('p_vals_1.txt', 'wb') as f:
-				pickle.dump(p_vals, f)
-
-			with open('m_vals_1.txt', 'wb') as f:
-				pickle.dump(m_vals, f)
-
-		if count % 5 == 0:
-			day = t_list_5[count_5]
-			t_count_5 = 0
-			day_l = precomputed_5[day[0]]
-			if day[0] not in dates_5:
-
-				for t in texts_5:
-					z_vals_5.append(score_zip(day[1], t[1], day_l[1], precomputed_5[t[0]][1]))
-					p_vals_5.append(score_def(day[1], t[1], day_l[0], precomputed_5[t[0]][0]))
-					m_vals_5.append(score_lzma(day[1], t[1], day_l[2], precomputed_5[t[0]][2]))
-					t_count_5 += 1
-
-					print(5, count_5, t_count_5)
-
-				z_vals_5.append(0)
-				p_vals_5.append(0)
-				m_vals_5.append(0)
-				dates_5.append(day[0])
-
-			texts_5.append(day)
-			count_5 += 1
-
-			with open('dates_5.txt', 'wb') as f:
-				pickle.dump(dates_5, f)
-
-			with open('z_vals_5.txt', 'wb') as f:
-				pickle.dump(z_vals_5, f)
-
-			with open('p_vals_5.txt', 'wb') as f:
-				pickle.dump(p_vals_5, f)
-
-			with open('m_vals_5.txt', 'wb') as f:
-				pickle.dump(m_vals_5, f)
-
-		if count % 20 == 0:
-			day = t_list_20[count_20]
-			t_count_20 = 0
-			day_l = precomputed_20[day[0]]
-			if day[0] not in dates_20:
-
-				for t in texts_20:
-					z_vals_20.append(score_zip(day[1], t[1], day_l[1], precomputed_20[t[0]][1]))
-					p_vals_20.append(score_def(day[1], t[1], day_l[0], precomputed_20[t[0]][0]))
-					m_vals_20.append(score_lzma(day[1], t[1], day_l[2], precomputed_20[t[0]][2]))
-					t_count_20 += 1
-
-					print(20, count_20, t_count_20)
-
-				z_vals_20.append(0)
-				p_vals_20.append(0)
-				m_vals_20.append(0)
-				dates_20.append(day[0])
-
-			texts_20.append(day)
-			count_20 += 1
-
-			with open('dates_20.txt', 'wb') as f:
-				pickle.dump(dates_20, f)
-
-			with open('z_vals_20.txt', 'wb') as f:
-				pickle.dump(z_vals_20, f)
-
-			with open('p_vals_20.txt', 'wb') as f:
-				pickle.dump(p_vals_20, f)
-
-			with open('m_vals_20.txt', 'wb') as f:
-				pickle.dump(m_vals_20, f)
-
+	return l_m, u_m
 
 if __name__ == '__main__':
-	paths = ['1', '5', '20']
-	for p in paths:
-		compute_all_clusters(p)
-		compute_all_silhouette(p)
+
+	#Compute all results
+
+	average_performance = dict()
+	for i in ['1', '5', '20']:
+		for j in ['_p', '_z', '_m']:
+			average_performance[i+j] = []
+	t_f = []
+	t_r = []
+	for i in range(0, 500):
+		val, full, rand = run_splits(100, ['1', '5', '20'], seed = i)
+		t_f.append(full)
+		t_r.append(rand)
+		for v in val:
+			if v[0] != 'NA':
+				average_performance[v[0]].append((v[1][0], v[1][3]))
+
+		print(i)
+
+	for key in average_performance:
+		l = []
+		u = []
+		for i in average_performance[key]:
+
+			l.append(i[0])
+			u.append(i[1])
+		s = one_tailed_t_test(np.mean(u), math.sqrt(np.var(u)), len(u), np.mean(l), math.sqrt(np.var(l)), len(l))
+		print(key, np.mean(l), np.mean(u), s)
+
+
+	average_performance_2 = dict()
+	for i in ['1', '5', '20']:
+		for j in ['_p', '_z', '_m']:
+			average_performance_2[i+j] = []
+
+	with open('s_p.txt', 'rb') as f:
+			s_p = pickle.load(f)
+
+	for f in t_f:
+		for key in f:
+			with open('dates_'+ key +'.txt', 'rb') as fl:
+				dates = pickle.load(fl)
+				dates.reverse()
+
+			returns = dict()
+			for i in range(0, len(dates)-1):
+				returns[len(dates)-1-i] = (s_p[dates[len(dates)-2-i]] - s_p[dates[len(dates)-1-i]])/s_p[dates[len(dates)-1-i]]
+
+			for c in [(0, '_p'), (1, '_z'), (2, '_m')]:
+				results = f[key][c[0]]
+				classify = [0 for _ in range(0, len(dates))]
+				for r in results:
+					for i in r[6]:
+						classify[i] -= 1
+					for i in r[7]:
+						classify[i] += 1
+
+				lower = []
+				upper = []
+
+				for i in range(1, len(dates)):
+					if classify[i] < 0:
+						lower.append(returns[i])
+					if classify[i] > 0:
+						upper.append(returns[i])
+				if len(lower) > 0 and len(upper) > 0:
+
+					average_performance_2[key+c[1]].append((np.mean(lower), np.mean(upper)))
+
+
+	for key in average_performance_2:
+		l = []
+		u = []
+		for i in average_performance_2[key]:
+
+			l.append(i[0])
+			u.append(i[1])
+		s = one_tailed_t_test(np.mean(u), math.sqrt(np.var(u)), len(u), np.mean(l), math.sqrt(np.var(l)), len(l))
+		print(key, np.mean(l), np.mean(u), s)
+
+	average_performance_3 = dict()
+	for i in ['1', '5', '20']:
+		for j in ['_p', '_z', '_m']:
+			average_performance_3[i+j] = []
+
+
+	for r in t_r:
+		for key in r:
+			for c in [(0, '_p'), (1, '_z'), (2, '_m')]:
+				average_performance_3[key+c[1]].append(r[key][c[0]])
+
+	for key in average_performance_3:
+		l = []
+		u = []
+		for i in average_performance_3[key]:
+			if i[0] != 'NA':
+				l.append(i[0])
+				u.append(i[1])
+		s = one_tailed_t_test(np.mean(u), math.sqrt(np.var(u)), len(u), np.mean(l), math.sqrt(np.var(l)), len(l))
+		print(key, np.mean(l), np.mean(u), s)
 
